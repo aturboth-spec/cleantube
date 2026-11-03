@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         클린튜브 (휴대폰용) - 광고 건너뛰기·백그라운드 재생
 // @namespace    cleantube
-// @version      1.3.0
+// @version      1.4.0
 // @description  유튜브 동영상 광고 자동 건너뛰기, 화면 광고 숨김, 화면 꺼도 계속 재생
 // @match        *://www.youtube.com/*
 // @match        *://m.youtube.com/*
@@ -36,10 +36,14 @@
   const hidDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
   const realHidden = () => { try { return hidDesc.get.call(document); } catch (e) { return false; } };
   let hiddenAt = 0;
+  let onVis = () => {};
 
   // 화면 꺼짐/탭 전환/포커스 잃음 이벤트를 유튜브가 받기 전에 차단
   const block = (e) => {
-    if (e.type !== 'blur' && realHidden()) hiddenAt = Date.now();
+    if (e.type !== 'blur') {
+      if (realHidden()) hiddenAt = Date.now();
+      try { onVis(); } catch (err) { /* 무시 */ }
+    }
     e.stopImmediatePropagation();
   };
   for (const t of ['visibilitychange', 'webkitvisibilitychange']) {
@@ -58,6 +62,71 @@
     }
   }, true);
 
+  // 화면이 안 보일 때(다른 앱 전환·화면 꺼짐) 유튜브가 스스로 거는 일시정지 명령을 무시.
+  // 사용자가 직접 누른 일시정지(화면 터치, 잠금화면·알림창 버튼)는 그대로 통과.
+  let lastUser = 0;
+  const markUser = () => { lastUser = Date.now(); };
+  for (const t of ['pointerdown', 'touchstart', 'mousedown', 'keydown']) {
+    window.addEventListener(t, markUser, true);
+  }
+  const install = (obj, name, fn) => {
+    try {
+      if (typeof exportFunction === 'function' && PW !== window) exportFunction(fn, obj, { defineAs: name });
+      else obj[name] = fn;
+    } catch (e) { /* 무시 */ }
+  };
+  const nativePause = HTMLMediaElement.prototype.pause;
+  const diag = { blocked: 0, userPause: 0, systemPause: 0, firstAt: 0 };
+  let lastAllowed = 0;
+  install(PW.HTMLMediaElement.prototype, 'pause', function () {
+    if (realHidden() && Date.now() - lastUser > 1500) { // 유튜브의 자동 일시정지 → 무시
+      diag.blocked++;
+      return;
+    }
+    lastAllowed = Date.now();
+    return nativePause.call(this);
+  });
+
+  // [진단] 안 보이는 동안 멈춘 원인 기록: 스크립트(유튜브·사용자) 경유인지, 브라우저·안드로이드가 직접 멈췄는지
+  document.addEventListener('pause', (e) => {
+    if (!(e.target instanceof HTMLVideoElement) || e.target.ended || !realHidden()) return;
+    if (Date.now() - lastAllowed < 800) diag.userPause++;
+    else diag.systemPause++;
+    if (!diag.firstAt) diag.firstAt = Math.round((Date.now() - hiddenAt) / 1000);
+  }, true);
+  const report = () => {
+    if (!diag.blocked && !diag.userPause && !diag.systemPause) return;
+    const msg = `클린튜브 진단 · 유튜브 정지 명령 차단 ${diag.blocked}회 · ` +
+      (diag.systemPause ? `브라우저/안드로이드가 직접 정지 ${diag.systemPause}회 (전환 ${diag.firstAt}초 후)`
+        : diag.userPause ? `직접 누른 정지 ${diag.userPause}회` : '정지 없음');
+    diag.blocked = diag.userPause = diag.systemPause = diag.firstAt = 0;
+    try {
+      const box = document.createElement('div');
+      box.textContent = msg;
+      box.style.cssText = 'position:fixed;left:8px;right:8px;bottom:70px;z-index:2147483647;background:#1b2333;color:#fff;' +
+        'font:14px/1.5 sans-serif;padding:12px 14px;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.35)';
+      (document.body || document.documentElement).appendChild(box);
+      setTimeout(() => box.remove(), 15000);
+      box.addEventListener('click', () => box.remove());
+    } catch (e) { /* 무시 */ }
+  };
+  // 잠금화면·알림창 버튼 → 유튜브 처리기 실행 전에 '사용자 조작'으로 표시
+  try {
+    const ms = PW.navigator.mediaSession;
+    if (ms && typeof ms.setActionHandler === 'function') {
+      const origSet = ms.setActionHandler;
+      const proto = PW.MediaSession ? PW.MediaSession.prototype : ms;
+      install(proto, 'setActionHandler', function (action, handler) {
+        let h = handler;
+        if (typeof handler === 'function') {
+          const w = function (details) { markUser(); return handler(details); };
+          h = (typeof exportFunction === 'function' && PW !== window) ? exportFunction(w, PW) : w;
+        }
+        return origSet.call(this, action, h);
+      });
+    }
+  } catch (e) { /* 무시 */ }
+
   // Firefox는 화면이 꺼지고 10초 뒤 영상 처리를 멈춰(절전) 소리까지 끊긴다.
   // 영상을 작은 캔버스에 한 번 그리면 Firefox가 이 절전을 해제한다.
   const cv = document.createElement('canvas');
@@ -70,9 +139,11 @@
   };
   document.addEventListener('playing', (e) => keepAwake(e.target), true);
   document.addEventListener('loadeddata', (e) => keepAwake(e.target), true);
-  setInterval(() => {
-    document.querySelectorAll('video').forEach((v) => { if (!v.paused) keepAwake(v); });
-  }, 5000);
+  // 화면이 안 보이게 되는 순간 한 번 더 그리고, 다시 보이면 진단 결과 표시 (block()에서 호출)
+  onVis = () => {
+    if (realHidden()) document.querySelectorAll('video').forEach((v) => { if (!v.paused) keepAwake(v); });
+    else setTimeout(report, 500);
+  };
 
   // "계속 시청하시겠습니까?" 일시정지 방지
   setInterval(() => { try { PW._lact = Date.now(); } catch (e) { /* 무시 */ } }, 30000);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         클린튜브 (휴대폰용) - 광고 건너뛰기·백그라운드 재생
 // @namespace    cleantube
-// @version      1.1.0
+// @version      1.2.0
 // @description  유튜브 동영상 광고 자동 건너뛰기, 화면 광고 숨김, 화면 꺼도 계속 재생
 // @match        *://www.youtube.com/*
 // @match        *://m.youtube.com/*
@@ -32,12 +32,31 @@
   pin('webkitHidden', false);
   pin('webkitVisibilityState', 'visible');
 
-  // 화면 꺼짐/탭 전환 이벤트를 유튜브가 받기 전에 차단
-  const block = (e) => e.stopImmediatePropagation();
+  // 실제 화면 상태(위장 전 원래 값)
+  const hidDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+  const realHidden = () => { try { return hidDesc.get.call(document); } catch (e) { return false; } };
+  let hiddenAt = 0;
+
+  // 화면 꺼짐/탭 전환/포커스 잃음 이벤트를 유튜브가 받기 전에 차단
+  const block = (e) => {
+    if (e.type !== 'blur' && realHidden()) hiddenAt = Date.now();
+    e.stopImmediatePropagation();
+  };
   for (const t of ['visibilitychange', 'webkitvisibilitychange']) {
     window.addEventListener(t, block, true);
     document.addEventListener(t, block, true);
   }
+  window.addEventListener('blur', (e) => { if (e.target === window || e.target === document) block(e); }, true);
+
+  // 화면이 꺼진 직후(3초 이내) 자동으로 멈춘 경우에만 다시 재생.
+  // 잠금화면에서 직접 일시정지한 경우(3초 이후)는 그대로 둔다.
+  document.addEventListener('pause', (e) => {
+    const v = e.target;
+    if (!(v instanceof HTMLMediaElement) || v.ended) return;
+    if (realHidden() && Date.now() - hiddenAt < 3000) {
+      setTimeout(() => { try { const r = v.play(); if (r && r.catch) r.catch(() => {}); } catch (err) { /* 무시 */ } }, 150);
+    }
+  }, true);
 
   // "계속 시청하시겠습니까?" 일시정지 방지
   setInterval(() => { try { PW._lact = Date.now(); } catch (e) { /* 무시 */ } }, 30000);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         클린튜브 (휴대폰용) - 광고 건너뛰기·백그라운드 재생
 // @namespace    cleantube
-// @version      1.2.0
+// @version      1.3.0
 // @description  유튜브 동영상 광고 자동 건너뛰기, 화면 광고 숨김, 화면 꺼도 계속 재생
 // @match        *://www.youtube.com/*
 // @match        *://m.youtube.com/*
@@ -57,6 +57,22 @@
       setTimeout(() => { try { const r = v.play(); if (r && r.catch) r.catch(() => {}); } catch (err) { /* 무시 */ } }, 150);
     }
   }, true);
+
+  // Firefox는 화면이 꺼지고 10초 뒤 영상 처리를 멈춰(절전) 소리까지 끊긴다.
+  // 영상을 작은 캔버스에 한 번 그리면 Firefox가 이 절전을 해제한다.
+  const cv = document.createElement('canvas');
+  cv.width = 2; cv.height = 2;
+  let g = null;
+  try { g = cv.getContext('2d'); } catch (e) { /* 무시 */ }
+  const keepAwake = (v) => {
+    if (!g || !(v instanceof HTMLVideoElement) || v.readyState < 2) return;
+    try { g.drawImage(v, 0, 0, 2, 2); } catch (e) { /* 무시 */ }
+  };
+  document.addEventListener('playing', (e) => keepAwake(e.target), true);
+  document.addEventListener('loadeddata', (e) => keepAwake(e.target), true);
+  setInterval(() => {
+    document.querySelectorAll('video').forEach((v) => { if (!v.paused) keepAwake(v); });
+  }, 5000);
 
   // "계속 시청하시겠습니까?" 일시정지 방지
   setInterval(() => { try { PW._lact = Date.now(); } catch (e) { /* 무시 */ } }, 30000);
